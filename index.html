@@ -475,6 +475,7 @@
     <div id="dayMsgBanner" style="display:none;"></div>
 
     <button class="btn-block" id="markPeriodBtn">Marcar como inicio de periodo</button>
+    <button class="btn-block secondary" id="togglePeriodDayBtn" style="margin-top:8px;">—</button>
 
     <label class="field-label">Flujo</label>
     <div class="chip-group" id="flowChips">
@@ -526,8 +527,9 @@ let selectedDateStr = null;
 let store = {
   cycleLen: 28,
   periodLen: 5,
-  history: [],      // ["2026-06-15", "2026-07-13", ...] ascending
-  logs: {}           // { "2026-07-04": { flow, moods:[], symptoms:[], notes } }
+  history: [],          // ["2026-06-15", "2026-07-13", ...] ascending
+  logs: {},              // { "2026-07-04": { flow, moods:[], symptoms:[], notes } }
+  periodOverrides: {}    // { "2026-07-20": true } agrega un día extra, { "...": false } quita uno calculado
 };
 
 const STORAGE_KEY = 'cycle-data-v1';
@@ -623,7 +625,11 @@ function getCycleDayInfo(date){
   const fertileEnd = ovDay;
   const pmsStart = store.cycleLen - 3;
 
-  const isPeriod = cycleDay <= store.periodLen;
+  let isPeriod = cycleDay <= store.periodLen;
+  const dateStr = toDateStr(date);
+  if(Object.prototype.hasOwnProperty.call(store.periodOverrides, dateStr)){
+    isPeriod = store.periodOverrides[dateStr];
+  }
   const isOvulation = cycleDay === ovDay;
   const isFertile = cycleDay >= fertileStart && cycleDay <= fertileEnd;
   const isPMS = cycleDay >= pmsStart && cycleDay <= store.cycleLen && !isPeriod;
@@ -861,6 +867,14 @@ function openDayModal(dateStr){
   document.querySelectorAll('#symptomChips .chip').forEach(c => c.classList.toggle('active', log.symptoms.includes(c.dataset.val)));
   document.getElementById('dayNotes').value = log.notes || '';
 
+  const toggleBtn = document.getElementById('togglePeriodDayBtn');
+  if(info){
+    toggleBtn.style.display = 'block';
+    toggleBtn.textContent = info.isPeriod ? 'Quitar este día del periodo' : 'Agregar este día al periodo';
+  } else {
+    toggleBtn.style.display = 'none';
+  }
+
   document.getElementById('dayOverlay').classList.add('open');
 }
 
@@ -913,6 +927,18 @@ document.getElementById('markPeriodBtn').addEventListener('click', () => {
   renderAll();
 });
 
+document.getElementById('togglePeriodDayBtn').addEventListener('click', () => {
+  const date = parseDateStr(selectedDateStr);
+  const info = getCycleDayInfo(date);
+  if(!info) return;
+  // Guarda lo contrario de lo que se ve ahora mismo — así se puede
+  // extender un periodo que dura más días, o quitar uno marcado de más.
+  store.periodOverrides[selectedDateStr] = !info.isPeriod;
+  saveData();
+  closeDayModal();
+  renderAll();
+});
+
 // ---------- Navegación de mes ----------
 document.getElementById('prevBtn').addEventListener('click', () => {
   viewMonth--; if(viewMonth<0){ viewMonth=11; viewYear--; }
@@ -957,7 +983,7 @@ document.getElementById('settingsSaveBtn').addEventListener('click', () => {
 });
 document.getElementById('resetDataBtn').addEventListener('click', () => {
   if(confirm('¿Borrar todos los datos guardados? Esto no se puede deshacer.')){
-    store = { cycleLen: 28, periodLen: 5, history: [], logs: {} };
+    store = { cycleLen: 28, periodLen: 5, history: [], logs: {}, periodOverrides: {} };
     saveData();
     document.getElementById('settingsOverlay').classList.remove('open');
     document.getElementById('setupOverlay').classList.add('open');
