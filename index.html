@@ -1073,7 +1073,8 @@ function cycleRowHtml(c){
   const bleedTxt = c.bleed ? `${c.bleed} ${c.bleed===1?'día':'días'} de sangrado` : `sangrado: sin registrar`;
   const epTxt = c.episodes.length ? `<div class="cyc-sub" style="color:#b0602a;">⚡ Incluye ${c.episodes.length} sangrado${c.episodes.length===1?'':'s'} inesperado${c.episodes.length===1?'':'s'} (${c.episodes.map(fmtDate).join(', ')})</div>` : '';
   return `<div class="cyc-row" data-start="${c.start}">
-    <div class="cyc-top"><span>${fmtDate(c.start)}</span><span class="dev ${c.atypical ? 'cur' : devClass(c.refDelta)}">${c.atypical ? 'Atípico · no cuenta' : devLabel(c.refDelta)}</span></div>
+    <div class="cyc-top"><span>${fmtDate(c.start)} → ${fmtDate(c.next)}</span><span class="dev ${c.atypical ? 'cur' : devClass(c.refDelta)}">${c.atypical ? 'Atípico · no cuenta' : devLabel(c.refDelta)}</span></div>
+    ${c.atypical ? '' : `<div class="cyc-sub" style="color:var(--ink);">📅 Se esperaba el <b>${fmtDate(toDateStr(addDays(parseDateStr(c.start), store.refCycleLen || 28)))}</b> · llegó el <b>${fmtDate(c.next)}</b> = <b>${c.refDelta === 0 ? 'a tiempo' : (c.refDelta > 0 ? `${c.refDelta} ${c.refDelta===1?'día':'días'} de atraso` : `${-c.refDelta} ${c.refDelta===-1?'día':'días'} antes`)}</b></div>`}
     <div class="cyc-sub">Duró ${c.len} días${c.atypical ? ' (¿fecha mal puesta o manchado?)' : ` · referencia ${store.refCycleLen}`} · ${bleedTxt}</div>
     ${c.atypical ? '' : `<div class="cyc-sub">Contra su propio ritmo (${c.expected}): ${c.delta>0?'+':''}${c.delta} ${Math.abs(c.delta)===1?'día':'días'}</div>`}
     ${epTxt}
@@ -1132,6 +1133,7 @@ function renderHistory(){
     const curNote = store.cycleNotes[lastStr];
     items.push({ start: lastStr, html: `<div class="cyc-row" data-start="${lastStr}">
       <div class="cyc-top"><span>${fmtDate(lastStr)}</span><span class="dev ${late > 0 ? 'bad' : 'cur'}">${late > 0 ? `En curso · atraso ${late} ${late===1?'día':'días'}` : 'En curso'}</span></div>
+      <div class="cyc-sub" style="color:var(--ink);">📅 Se espera el <b>${fmtDate(toDateStr(addDays(parseDateStr(lastStr), store.refCycleLen || 28)))}</b> (referencia ${store.refCycleLen}) · según su ritmo, el <b>${fmtDate(toDateStr(addDays(parseDateStr(lastStr), store.cycleLen)))}</b></div>
       <div class="cyc-sub">Día ${Math.max(1, sinceStart)} del ciclo (referencia ${store.refCycleLen} · su ritmo ${store.cycleLen}) · ${curBleed}</div>
       ${curNote ? `<div class="cyc-note">“${escapeHtml(curNote)}”</div>` : ''}
     </div>` });
