@@ -444,6 +444,7 @@
     </div>
     <div class="hist-body">
       <div id="histSummary"></div>
+      <div id="histEpisodes"></div>
       <div id="histChart" class="chart-wrap"></div>
       <div id="histBody"></div>
       <button class="btn-block secondary" id="addCycleBtn">+ Agregar ciclo pasado</button>
@@ -507,7 +508,11 @@
     <input type="date" id="cycStart" class="date-in">
     <label class="field-label" for="cycEnd">Último día de sangrado (opcional)</label>
     <input type="date" id="cycEnd" class="date-in">
-    <label class="field-label" for="cycNote">Nota del ciclo</label>
+    <label style="display:flex; align-items:center; gap:10px; margin-top:14px; font-size:13px; color:var(--ink); cursor:pointer;">
+      <input type="checkbox" id="cycUnexp" style="width:20px; height:20px; flex:none;">
+      <span>⚡ Fue un sangrado inesperado (fuera de su ciclo normal)</span>
+    </label>
+    <label class="field-label" for="cycNote">Nota (causa, síntomas, contexto)</label>
     <textarea id="cycNote" placeholder="Ej: estrés, viaje, enfermedad, medicamento..."></textarea>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="cycCloseBtn">Cerrar</button>
@@ -526,6 +531,7 @@
     <div id="dayMsgBanner" style="display:none;"></div>
 
     <button class="btn-block" id="markPeriodBtn">Marcar como inicio de periodo</button>
+    <button class="btn-block secondary" id="markUnexpBtn" style="margin-top:8px; display:none;">⚡ Marcar como sangrado inesperado</button>
     <button class="btn-block secondary" id="togglePeriodDayBtn" style="margin-top:8px;">—</button>
     <button class="btn-block secondary" id="endPeriodBtn" style="margin-top:8px; display:none;">🩸 El periodo terminó este día</button>
 
@@ -584,6 +590,7 @@ let store = {
   periodOverrides: {},   // { "2026-07-20": true } agrega un día extra, { "...": false } quita uno calculado
   periodEnds: {},        // { "2026-07-13": "2026-07-18" } último día real de sangrado de cada ciclo
   cycleNotes: {},        // { "2026-07-13": "viaje, estrés" } nota por ciclo
+  cycleFlags: {},        // { "2026-10-09": true } sangrado inesperado (fuera de ciclo, no cuenta como periodo normal)
   baseCycleLen: 28       // ciclo esperado inicial (para comparar el primer ciclo)
 };
 
@@ -659,9 +666,15 @@ function daysBetween(a, b){
 }
 
 // ---------- Cálculo del ciclo ----------
+// Inicios de periodo "normales" (sin los sangrados inesperados), ascendente
+function regularStarts(){
+  return [...store.history].sort().filter(d => !store.cycleFlags[d]);
+}
 function getLastPeriodStart(){
   if(store.history.length === 0) return null;
-  return parseDateStr(store.history[store.history.length-1]);
+  const regs = regularStarts();
+  const last = regs.length ? regs[regs.length-1] : [...store.history].sort().pop();
+  return parseDateStr(last);
 }
 
 function getOvulationOffset(){
@@ -720,12 +733,14 @@ function getCycleDayInfo(date){
 }
 
 function recalcAverageCycle(){
-  if(store.history.length < 2) return;
-  const dates = store.history.map(parseDateStr);
+  if(regularStarts().length < 2) return;
+  const dates = regularStarts().map(parseDateStr);
   let diffs = [];
   for(let i=1; i<dates.length; i++){
-    diffs.push(daysBetween(dates[i-1], dates[i]));
+    const g = daysBetween(dates[i-1], dates[i]);
+    if(!isAtypical(g)) diffs.push(g);
   }
+  if(diffs.length === 0) return;
   const avg = Math.round(diffs.reduce((a,b)=>a+b,0) / diffs.length);
   if(avg >= 18 && avg <= 45) store.cycleLen = avg;
 }
@@ -739,8 +754,10 @@ async function loadData(){
       store = Object.assign(store, parsed);
       if(!store.periodEnds) store.periodEnds = {};
       if(!store.cycleNotes) store.cycleNotes = {};
+      if(!store.cycleFlags) store.cycleFlags = {};
       if(!store.periodOverrides) store.periodOverrides = {};
       if(!store.baseCycleLen) store.baseCycleLen = store.cycleLen || 28;
+      if(store.calcVersion !== 2){ store.calcVersion = 2; recalcAverageCycle(); saveData(); }
     }
   }catch(e){ /* no hay datos guardados todavía */ }
 
@@ -912,6 +929,9 @@ function fmtDate(s){
   const d = parseDateStr(s);
   return `${d.getDate()} ${monthNames[d.getMonth()].slice(0,3)} ${d.getFullYear()}`;
 }
+// Ciclos de menos de 18 o más de 60 días casi nunca son un ciclo real completo
+// (manchado, fecha mal puesta, periodo omitido): no se usan en promedios ni predicciones.
+function isAtypical(len){ return len < 18 || len > 60; }
 function devClass(delta){
   const a = Math.abs(delta);
   return a <= 2 ? 'ok' : (a <= 6 ? 'warn' : 'bad');
@@ -925,17 +945,34 @@ function devLabel(delta){
 // Ciclos completos (entre dos inicios de periodo), con comparación real vs. esperado.
 // El esperado de cada ciclo = promedio de los ciclos anteriores (el primero usa el ciclo base).
 function computeCycles(){
-  const h = [...store.history].sort();
+  const h = regularStarts();
   const out = [], gaps = [];
   for(let i = 0; i < h.length - 1; i++){
     const len = daysBetween(parseDateStr(h[i]), parseDateStr(h[i+1]));
+    const atypical = isAtypical(len);
     const expected = gaps.length ? Math.round(gaps.reduce((a,b)=>a+b,0) / gaps.length) : (store.baseCycleLen || store.cycleLen);
     const end = store.periodEnds[h[i]];
     const bleed = end ? daysBetween(parseDateStr(h[i]), parseDateStr(end)) + 1 : null;
-    out.push({ start: h[i], next: h[i+1], len, expected, delta: len - expected, bleed, note: store.cycleNotes[h[i]] || '' });
-    gaps.push(len);
+    const episodes = episodesList().filter(e => e > h[i] && e < h[i+1]);
+    out.push({ start: h[i], next: h[i+1], len, expected, delta: len - expected, bleed, atypical, episodes, note: store.cycleNotes[h[i]] || '' });
+    if(!atypical) gaps.push(len);
   }
   return out;
+}
+
+// Sangrados inesperados registrados, con el día del ciclo en que ocurrieron
+function episodesList(){
+  return [...store.history].sort().filter(d => store.cycleFlags[d]);
+}
+function episodeInfo(e){
+  const prev = regularStarts().filter(d => d < e).pop();
+  const end = store.periodEnds[e];
+  return {
+    start: e,
+    cycleDay: prev ? daysBetween(parseDateStr(prev), parseDateStr(e)) + 1 : null,
+    bleed: end ? daysBetween(parseDateStr(e), parseDateStr(end)) + 1 : null,
+    note: store.cycleNotes[e] || ''
+  };
 }
 
 function renderSummary(cycles){
@@ -944,10 +981,16 @@ function renderSummary(cycles){
     box.innerHTML = `<div style="font-size:12.5px; color:var(--muted); padding:6px 0 10px;">Cuando registres al menos dos inicios de periodo verás aquí promedios, regularidad y gráfica. Puedes agregar ciclos pasados abajo.</div>`;
     return;
   }
-  const lens = cycles.map(c => c.len);
+  const typical = cycles.filter(c => !c.atypical);
+  const nAtyp = cycles.length - typical.length;
+  if(typical.length === 0){
+    box.innerHTML = `<div style="font-size:12.5px; color:var(--muted); padding:6px 0 10px;">Los ciclos registrados son atípicos (menos de 18 o más de 60 días). Revisa las fechas de inicio.</div>`;
+    return;
+  }
+  const lens = typical.map(c => c.len);
   const avg = lens.reduce((a,b)=>a+b,0) / lens.length;
   const min = Math.min(...lens), max = Math.max(...lens);
-  const recent = cycles.slice(-6);
+  const recent = typical.slice(-6);
   const lates = recent.filter(c => c.delta >= 3);
   const avgDelay = lates.length ? Math.round(lates.reduce((a,c)=>a+c.delta,0) / lates.length) : 0;
   const bleeds = cycles.filter(c => c.bleed).map(c => c.bleed);
@@ -977,6 +1020,7 @@ function renderSummary(cycles){
       <div class="sum-box"><div class="n">${avgBleed ? avgBleed.toFixed(1).replace('.0','') : '—'}</div><div class="l">Días de sangrado</div></div>
     </div>
     <span class="reg-pill ${regCls}">${regText}</span>
+    ${nAtyp ? `<div style="font-size:11.5px; color:var(--muted); line-height:1.5; margin-bottom:6px;">⚠️ ${nAtyp} ${nAtyp===1?'ciclo atípico no cuenta':'ciclos atípicos no cuentan'} en los promedios (menos de 18 o más de 60 días). Si fue un error de fecha, edítalo.</div>` : ''}
     ${lateLine ? `<div style="font-size:12px; color:var(--muted); line-height:1.5; margin-bottom:6px;">${lateLine}</div>` : ''}`;
 }
 
@@ -985,7 +1029,9 @@ function renderChart(cycles){
   if(cycles.length === 0){ box.innerHTML = ''; return; }
   const data = cycles.slice(-8);
   const lens = data.map(c => c.len);
-  const avg = cycles.reduce((a,c)=>a+c.len,0) / cycles.length;
+  const typ = cycles.filter(c => !c.atypical);
+  if(typ.length === 0){ box.innerHTML = ''; return; }
+  const avg = typ.reduce((a,c)=>a+c.len,0) / typ.length;
   const lo = Math.max(0, Math.min(...lens, avg) - 8);
   const hi = Math.max(...lens, avg) + 3;
   const W = 300, H = 130, padL = 8, padR = 8, top = 16, bottom = 22;
@@ -1000,51 +1046,83 @@ function renderChart(cycles){
   data.forEach((c, i) => {
     const x = padL + slot * i + (slot - bw) / 2;
     const yt = y(c.len);
-    svg += `<rect x="${x}" y="${yt}" width="${bw}" height="${top + innerH - yt}" rx="4" fill="${colors[devClass(c.delta)]}"/>`;
+    svg += `<rect x="${x}" y="${yt}" width="${bw}" height="${top + innerH - yt}" rx="4" fill="${c.atypical ? '#b9aebf' : colors[devClass(c.delta)]}"/>`;
     svg += `<text x="${x + bw/2}" y="${yt - 3}" text-anchor="middle" font-size="9" font-weight="700" fill="currentColor">${c.len}</text>`;
     const d = parseDateStr(c.start);
-    svg += `<text x="${x + bw/2}" y="${H - 8}" text-anchor="middle" font-size="8.5" fill="#9a8aa0">${monthNames[d.getMonth()].slice(0,3)}</text>`;
+    svg += `<text x="${x + bw/2}" y="${H - 8}" text-anchor="middle" font-size="8.5" fill="#9a8aa0">${monthNames[d.getMonth()].slice(0,3)}${c.episodes.length ? ' ⚡' : ''}</text>`;
   });
   svg += `</svg>`;
-  box.innerHTML = svg + `<div style="font-size:10.5px; color:var(--muted); text-align:center;">Largo de cada ciclo · línea punteada = promedio (${avg.toFixed(1).replace('.0','')}) <br><span style="color:#4f9d7a">●</span> a tiempo (±2) <span style="color:#c9973a">●</span> leve (3–6) <span style="color:#c0506a">●</span> marcado (7+)</div>`;
+  box.innerHTML = svg + `<div style="font-size:10.5px; color:var(--muted); text-align:center;">Largo de cada ciclo · línea punteada = promedio (${avg.toFixed(1).replace('.0','')}) <br><span style="color:#4f9d7a">●</span> a tiempo (±2) <span style="color:#c9973a">●</span> leve (3–6) <span style="color:#c0506a">●</span> marcado (7+) <span style="color:#b9aebf">●</span> atípico · ⚡ sangrado inesperado en ese ciclo</div>`;
 }
 
 function cycleRowHtml(c){
   const bleedTxt = c.bleed ? `${c.bleed} ${c.bleed===1?'día':'días'} de sangrado` : `sangrado: sin registrar`;
+  const epTxt = c.episodes.length ? `<div class="cyc-sub" style="color:#b0602a;">⚡ Incluye ${c.episodes.length} sangrado${c.episodes.length===1?'':'s'} inesperado${c.episodes.length===1?'':'s'} (${c.episodes.map(fmtDate).join(', ')})</div>` : '';
   return `<div class="cyc-row" data-start="${c.start}">
-    <div class="cyc-top"><span>${fmtDate(c.start)}</span><span class="dev ${devClass(c.delta)}">${devLabel(c.delta)}</span></div>
-    <div class="cyc-sub">Duró ${c.len} días (esperado ${c.expected}) · ${bleedTxt}</div>
+    <div class="cyc-top"><span>${fmtDate(c.start)}</span><span class="dev ${c.atypical ? 'cur' : devClass(c.delta)}">${c.atypical ? 'Atípico · no cuenta' : devLabel(c.delta)}</span></div>
+    <div class="cyc-sub">Duró ${c.len} días${c.atypical ? ' (¿fecha mal puesta o manchado?)' : ` (esperado ${c.expected})`} · ${bleedTxt}</div>
+    ${epTxt}
     ${c.note ? `<div class="cyc-note">“${escapeHtml(c.note)}”</div>` : ''}
+  </div>`;
+}
+
+function episodeRowHtml(e){
+  const i = episodeInfo(e);
+  return `<div class="cyc-row" data-start="${e}" style="background:rgba(224,140,70,.10); margin:0 -8px; padding-left:8px; padding-right:8px; border-radius:10px;">
+    <div class="cyc-top"><span>${fmtDate(e)}</span><span class="dev warn" style="background:#fbe3cf; color:#b0602a;">⚡ Sangrado inesperado</span></div>
+    <div class="cyc-sub">${i.cycleDay ? `Ocurrió el día ${i.cycleDay} del ciclo · ` : ''}${i.bleed ? `${i.bleed} ${i.bleed===1?'día':'días'} de sangrado` : 'sangrado: sin registrar'} · no cuenta como periodo normal</div>
+    ${i.note ? `<div class="cyc-note">“${escapeHtml(i.note)}”</div>` : ''}
+  </div>`;
+}
+
+function renderEpisodes(){
+  const box = document.getElementById('histEpisodes');
+  const eps = episodesList().map(episodeInfo);
+  if(eps.length === 0){ box.innerHTML = ''; return; }
+  const bl = eps.filter(e => e.bleed).map(e => e.bleed);
+  const days = eps.filter(e => e.cycleDay).map(e => e.cycleDay);
+  const last = eps[eps.length-1];
+  box.innerHTML = `<div style="background:#fbe3cf; color:#8a4a1c; border-radius:12px; padding:10px 12px; font-size:12px; line-height:1.55; margin-bottom:10px;">
+    <b>⚡ ${eps.length} sangrado${eps.length===1?'':'s'} inesperado${eps.length===1?'':'s'}</b><br>
+    Último: ${fmtDate(last.start)}${last.cycleDay ? ` (día ${last.cycleDay} del ciclo)` : ''}${last.bleed ? ` · ${last.bleed} días` : ''}.
+    ${days.length > 1 ? `<br>Suelen aparecer entre el día ${Math.min(...days)} y el ${Math.max(...days)} del ciclo.` : ''}
+    ${bl.length > 1 ? `<br>Duran en promedio ${(bl.reduce((a,b)=>a+b,0)/bl.length).toFixed(1).replace('.0','')} días.` : ''}
+    <br><span style="opacity:.8;">Si se repite, conviene comentarlo con su médico.</span>
   </div>`;
 }
 
 function renderHistory(){
   const body = document.getElementById('histBody');
   if(store.history.length === 0){
-    document.getElementById('histSummary').innerHTML = '';
-    document.getElementById('histChart').innerHTML = '';
+    ['histSummary','histChart','histEpisodes'].forEach(id => document.getElementById(id).innerHTML = '');
     body.innerHTML = `<div style="font-size:12.5px; color:var(--muted); padding:8px 0;">Aún no has registrado ningún periodo.</div>`;
     return;
   }
   const cycles = computeCycles();
   renderSummary(cycles);
   renderChart(cycles);
+  renderEpisodes();
 
-  // Ciclo en curso (el último inicio registrado)
-  const lastStr = [...store.history].sort().pop();
-  const sinceStart = daysBetween(parseDateStr(lastStr), today) + 1;
-  const late = getLateDays();
-  const curEnd = store.periodEnds[lastStr];
-  const curBleed = curEnd ? `${daysBetween(parseDateStr(lastStr), parseDateStr(curEnd)) + 1} días de sangrado` : 'sangrado: sin registrar';
-  const curNote = store.cycleNotes[lastStr];
-  let html = `<div class="cyc-row" data-start="${lastStr}">
-    <div class="cyc-top"><span>${fmtDate(lastStr)}</span><span class="dev ${late > 0 ? 'bad' : 'cur'}">${late > 0 ? `En curso · atraso ${late} ${late===1?'día':'días'}` : 'En curso'}</span></div>
-    <div class="cyc-sub">Día ${Math.max(1, sinceStart)} del ciclo (esperado ${store.cycleLen}) · ${curBleed}</div>
-    ${curNote ? `<div class="cyc-note">“${escapeHtml(curNote)}”</div>` : ''}
-  </div>`;
-  html += [...cycles].reverse().map(cycleRowHtml).join('');
-  body.innerHTML = html;
+  const regs = regularStarts();
+  const items = [];
+  cycles.forEach(c => items.push({ start: c.start, html: cycleRowHtml(c) }));
+  episodesList().forEach(e => items.push({ start: e, html: episodeRowHtml(e) }));
 
+  if(regs.length){
+    const lastStr = regs[regs.length-1];
+    const sinceStart = daysBetween(parseDateStr(lastStr), today) + 1;
+    const late = getLateDays();
+    const curEnd = store.periodEnds[lastStr];
+    const curBleed = curEnd ? `${daysBetween(parseDateStr(lastStr), parseDateStr(curEnd)) + 1} días de sangrado` : 'sangrado: sin registrar';
+    const curNote = store.cycleNotes[lastStr];
+    items.push({ start: lastStr, html: `<div class="cyc-row" data-start="${lastStr}">
+      <div class="cyc-top"><span>${fmtDate(lastStr)}</span><span class="dev ${late > 0 ? 'bad' : 'cur'}">${late > 0 ? `En curso · atraso ${late} ${late===1?'día':'días'}` : 'En curso'}</span></div>
+      <div class="cyc-sub">Día ${Math.max(1, sinceStart)} del ciclo (esperado ${store.cycleLen}) · ${curBleed}</div>
+      ${curNote ? `<div class="cyc-note">“${escapeHtml(curNote)}”</div>` : ''}
+    </div>` });
+  }
+  items.sort((a,b) => a.start < b.start ? 1 : -1);
+  body.innerHTML = items.map(i => i.html).join('');
   body.querySelectorAll('.cyc-row').forEach(row => {
     row.addEventListener('click', () => openCycleModal(row.dataset.start));
   });
@@ -1060,6 +1138,7 @@ function openCycleModal(startStr){
   document.getElementById('cycStart').value = startStr || '';
   document.getElementById('cycEnd').value = (startStr && store.periodEnds[startStr]) || '';
   document.getElementById('cycNote').value = (startStr && store.cycleNotes[startStr]) || '';
+  document.getElementById('cycUnexp').checked = !!(startStr && store.cycleFlags[startStr]);
   document.getElementById('cycDeleteBtn').style.display = startStr ? 'block' : 'none';
   document.getElementById('cycleOverlay').classList.add('open');
 }
@@ -1078,6 +1157,7 @@ document.getElementById('cycSaveBtn').addEventListener('click', () => {
   const start = document.getElementById('cycStart').value;
   const end = document.getElementById('cycEnd').value;
   const note = document.getElementById('cycNote').value.trim();
+  const unexp = document.getElementById('cycUnexp').checked;
   if(!start){ alert('Pon la fecha en que empezó el periodo.'); return; }
   if(end){
     const span = daysBetween(parseDateStr(start), parseDateStr(end));
@@ -1093,12 +1173,14 @@ document.getElementById('cycSaveBtn').addEventListener('click', () => {
     store.history = store.history.filter(d => d !== editingCycleKey);
     delete store.periodEnds[editingCycleKey];
     delete store.cycleNotes[editingCycleKey];
+    delete store.cycleFlags[editingCycleKey];
   }
   if(!store.history.includes(start)) store.history.push(start);
   store.history.sort();
 
   if(end) store.periodEnds[start] = end; else delete store.periodEnds[start];
   if(note) store.cycleNotes[start] = note; else delete store.cycleNotes[start];
+  if(unexp) store.cycleFlags[start] = true; else delete store.cycleFlags[start];
 
   recalcAverageCycle();
   saveData();
@@ -1112,6 +1194,7 @@ document.getElementById('cycDeleteBtn').addEventListener('click', () => {
   store.history = store.history.filter(d => d !== editingCycleKey);
   delete store.periodEnds[editingCycleKey];
   delete store.cycleNotes[editingCycleKey];
+  delete store.cycleFlags[editingCycleKey];
   recalcAverageCycle();
   saveData();
   closeCycleModal();
@@ -1165,6 +1248,7 @@ function openDayModal(dateStr){
     toggleBtn.style.display = 'none';
   }
 
+  document.getElementById('markUnexpBtn').style.display = store.history.includes(dateStr) ? 'none' : 'block';
   const endBtn = document.getElementById('endPeriodBtn');
   const owner = getCycleStartFor(dateStr);
   if(owner && store.periodEnds[owner] === dateStr){
@@ -1229,6 +1313,18 @@ document.getElementById('markPeriodBtn').addEventListener('click', () => {
   renderAll();
 });
 
+document.getElementById('markUnexpBtn').addEventListener('click', () => {
+  if(!store.history.includes(selectedDateStr)){
+    store.history.push(selectedDateStr);
+    store.history.sort();
+  }
+  store.cycleFlags[selectedDateStr] = true;
+  recalcAverageCycle();
+  saveData();
+  closeDayModal();
+  renderAll();
+});
+
 document.getElementById('endPeriodBtn').addEventListener('click', () => {
   const owner = getCycleStartFor(selectedDateStr);
   if(!owner) return;
@@ -1278,6 +1374,7 @@ document.getElementById('setupSaveBtn').addEventListener('click', () => {
   store.history = [dateVal];
   store.periodEnds = {};
   store.cycleNotes = {};
+  store.cycleFlags = {};
   saveData();
   document.getElementById('setupOverlay').classList.remove('open');
   renderAll();
@@ -1305,7 +1402,7 @@ document.getElementById('settingsSaveBtn').addEventListener('click', () => {
 });
 document.getElementById('resetDataBtn').addEventListener('click', () => {
   if(confirm('¿Borrar todos los datos guardados? Esto no se puede deshacer.')){
-    store = { cycleLen: 28, periodLen: 5, history: [], logs: {}, periodOverrides: {}, periodEnds: {}, cycleNotes: {}, baseCycleLen: 28 };
+    store = { cycleLen: 28, periodLen: 5, history: [], logs: {}, periodOverrides: {}, periodEnds: {}, cycleNotes: {}, cycleFlags: {}, baseCycleLen: 28 };
     saveData();
     document.getElementById('settingsOverlay').classList.remove('open');
     document.getElementById('setupOverlay').classList.add('open');
