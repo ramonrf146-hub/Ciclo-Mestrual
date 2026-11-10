@@ -491,6 +491,12 @@
         <input type="number" id="editPeriodLen" min="1" max="10">
       </div>
     </div>
+    <div class="settings-grid" style="margin-top:10px;">
+      <div class="fld">
+        <label>Ciclo de referencia (para medir atrasos)</label>
+        <input type="number" id="editRefLen" min="18" max="45">
+      </div>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="settingsCloseBtn">Cerrar</button>
       <button class="btn btn-primary" id="settingsSaveBtn">Guardar</button>
@@ -591,6 +597,7 @@ let store = {
   periodEnds: {},        // { "2026-07-13": "2026-07-18" } último día real de sangrado de cada ciclo
   cycleNotes: {},        // { "2026-07-13": "viaje, estrés" } nota por ciclo
   cycleFlags: {},        // { "2026-10-09": true } sangrado inesperado (fuera de ciclo, no cuenta como periodo normal)
+  refCycleLen: 28,       // ciclo de referencia FIJO para medir cuánto se atrasa cada ciclo
   baseCycleLen: 28       // ciclo esperado inicial (para comparar el primer ciclo)
 };
 
@@ -756,6 +763,7 @@ async function loadData(){
       if(!store.cycleNotes) store.cycleNotes = {};
       if(!store.cycleFlags) store.cycleFlags = {};
       if(!store.periodOverrides) store.periodOverrides = {};
+      if(!store.refCycleLen) store.refCycleLen = 28;
       if(!store.baseCycleLen) store.baseCycleLen = store.cycleLen || 28;
       if(store.calcVersion !== 2){ store.calcVersion = 2; recalcAverageCycle(); saveData(); }
     }
@@ -842,10 +850,12 @@ function renderStatus(){
   document.getElementById('stNextPeriod').textContent = daysToNext < 0 ? `+${-daysToNext}d` : (daysToNext === 0 ? 'Hoy' : `${daysToNext}d`);
 
   const banner = document.getElementById('lateBanner');
-  const late = getLateDays();
-  if(late > 0){
+  const ref = store.refCycleLen || 28;
+  const lateRef = Math.max(0, daysBetween(addDays(last, ref), today));
+  if(lateRef > 0){
     const exp = addDays(last, store.cycleLen);
-    banner.innerHTML = `Atraso: ${late} ${late === 1 ? 'día' : 'días'}<small>Se esperaba el ${exp.getDate()} de ${monthNames[exp.getMonth()]} · cuando llegue, marca "Inicio de periodo" en ese día</small>`;
+    const rest = daysBetween(today, exp);
+    banner.innerHTML = `Atraso: ${lateRef} ${lateRef === 1 ? 'día' : 'días'} sobre los ${ref}<small>${rest > 0 ? `Según su ritmo habitual (${store.cycleLen} días) llegaría el ${exp.getDate()} de ${monthNames[exp.getMonth()]}` : `Ya pasó lo que marca su ritmo habitual (${store.cycleLen} días)`} · cuando llegue, marca "Inicio de periodo" ese día</small>`;
     banner.style.display = 'block';
   } else {
     banner.style.display = 'none';
@@ -954,7 +964,7 @@ function computeCycles(){
     const end = store.periodEnds[h[i]];
     const bleed = end ? daysBetween(parseDateStr(h[i]), parseDateStr(end)) + 1 : null;
     const episodes = episodesList().filter(e => e > h[i] && e < h[i+1]);
-    out.push({ start: h[i], next: h[i+1], len, expected, delta: len - expected, bleed, atypical, episodes, note: store.cycleNotes[h[i]] || '' });
+    out.push({ start: h[i], next: h[i+1], len, expected, delta: len - expected, refDelta: len - (store.refCycleLen || 28), bleed, atypical, episodes, note: store.cycleNotes[h[i]] || '' });
     if(!atypical) gaps.push(len);
   }
   return out;
@@ -991,8 +1001,9 @@ function renderSummary(cycles){
   const avg = lens.reduce((a,b)=>a+b,0) / lens.length;
   const min = Math.min(...lens), max = Math.max(...lens);
   const recent = typical.slice(-6);
-  const lates = recent.filter(c => c.delta >= 3);
-  const avgDelay = lates.length ? Math.round(lates.reduce((a,c)=>a+c.delta,0) / lates.length) : 0;
+  const lates = recent.filter(c => c.refDelta >= 3);
+  const avgDelay = lates.length ? Math.round(lates.reduce((a,c)=>a+c.refDelta,0) / lates.length) : 0;
+  const avgRefDelta = recent.length ? (recent.reduce((a,c)=>a+c.refDelta,0) / recent.length) : 0;
   const bleeds = cycles.filter(c => c.bleed).map(c => c.bleed);
   const avgBleed = bleeds.length ? (bleeds.reduce((a,b)=>a+b,0) / bleeds.length) : null;
 
@@ -1009,8 +1020,8 @@ function renderSummary(cycles){
   let lateLine = '';
   if(recent.length >= 2){
     lateLine = lates.length
-      ? `En los últimos ${recent.length} ciclos se atrasó <b>${lates.length}</b> ${lates.length===1?'vez':'veces'} (promedio ${avgDelay} días de atraso).`
-      : `En los últimos ${recent.length} ciclos no hubo atrasos de 3 días o más.`;
+      ? `Contra la referencia de ${store.refCycleLen} días, en los últimos ${recent.length} ciclos se atrasó <b>${lates.length}</b> ${lates.length===1?'vez':'veces'} (promedio ${avgDelay} días). Atraso medio: <b>${avgRefDelta>0?'+':''}${avgRefDelta.toFixed(1).replace('.0','')}</b> días por ciclo.`
+      : `Contra la referencia de ${store.refCycleLen} días no hubo atrasos de 3 días o más en los últimos ${recent.length} ciclos.`;
   }
 
   box.innerHTML = `
@@ -1032,8 +1043,9 @@ function renderChart(cycles){
   const typ = cycles.filter(c => !c.atypical);
   if(typ.length === 0){ box.innerHTML = ''; return; }
   const avg = typ.reduce((a,c)=>a+c.len,0) / typ.length;
-  const lo = Math.max(0, Math.min(...lens, avg) - 8);
-  const hi = Math.max(...lens, avg) + 3;
+  const ref = store.refCycleLen || 28;
+  const lo = Math.max(0, Math.min(...lens, avg, ref) - 8);
+  const hi = Math.max(...lens, avg, ref) + 3;
   const W = 300, H = 130, padL = 8, padR = 8, top = 16, bottom = 22;
   const innerH = H - top - bottom;
   const slot = (W - padL - padR) / data.length;
@@ -1043,24 +1055,27 @@ function renderChart(cycles){
   let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Duración de los últimos ciclos">`;
   const ya = y(avg);
   svg += `<line x1="${padL}" x2="${W-padR}" y1="${ya}" y2="${ya}" stroke="#9a8aa0" stroke-width="1" stroke-dasharray="4 3"/>`;
+  const yr = y(ref);
+  svg += `<line x1="${padL}" x2="${W-padR}" y1="${yr}" y2="${yr}" stroke="#2f7a57" stroke-width="1.2"/>`;
   data.forEach((c, i) => {
     const x = padL + slot * i + (slot - bw) / 2;
     const yt = y(c.len);
-    svg += `<rect x="${x}" y="${yt}" width="${bw}" height="${top + innerH - yt}" rx="4" fill="${c.atypical ? '#b9aebf' : colors[devClass(c.delta)]}"/>`;
+    svg += `<rect x="${x}" y="${yt}" width="${bw}" height="${top + innerH - yt}" rx="4" fill="${c.atypical ? '#b9aebf' : colors[devClass(c.refDelta)]}"/>`;
     svg += `<text x="${x + bw/2}" y="${yt - 3}" text-anchor="middle" font-size="9" font-weight="700" fill="currentColor">${c.len}</text>`;
     const d = parseDateStr(c.start);
     svg += `<text x="${x + bw/2}" y="${H - 8}" text-anchor="middle" font-size="8.5" fill="#9a8aa0">${monthNames[d.getMonth()].slice(0,3)}${c.episodes.length ? ' ⚡' : ''}</text>`;
   });
   svg += `</svg>`;
-  box.innerHTML = svg + `<div style="font-size:10.5px; color:var(--muted); text-align:center;">Largo de cada ciclo · línea punteada = promedio (${avg.toFixed(1).replace('.0','')}) <br><span style="color:#4f9d7a">●</span> a tiempo (±2) <span style="color:#c9973a">●</span> leve (3–6) <span style="color:#c0506a">●</span> marcado (7+) <span style="color:#b9aebf">●</span> atípico · ⚡ sangrado inesperado en ese ciclo</div>`;
+  box.innerHTML = svg + `<div style="font-size:10.5px; color:var(--muted); text-align:center;">Largo de cada ciclo · línea verde = referencia (${ref}) · punteada = su promedio (${avg.toFixed(1).replace('.0','')}) <br><span style="color:#4f9d7a">●</span> a tiempo (±2 de la referencia) <span style="color:#c9973a">●</span> leve (3–6) <span style="color:#c0506a">●</span> marcado (7+) <span style="color:#b9aebf">●</span> atípico · ⚡ sangrado inesperado en ese ciclo</div>`;
 }
 
 function cycleRowHtml(c){
   const bleedTxt = c.bleed ? `${c.bleed} ${c.bleed===1?'día':'días'} de sangrado` : `sangrado: sin registrar`;
   const epTxt = c.episodes.length ? `<div class="cyc-sub" style="color:#b0602a;">⚡ Incluye ${c.episodes.length} sangrado${c.episodes.length===1?'':'s'} inesperado${c.episodes.length===1?'':'s'} (${c.episodes.map(fmtDate).join(', ')})</div>` : '';
   return `<div class="cyc-row" data-start="${c.start}">
-    <div class="cyc-top"><span>${fmtDate(c.start)}</span><span class="dev ${c.atypical ? 'cur' : devClass(c.delta)}">${c.atypical ? 'Atípico · no cuenta' : devLabel(c.delta)}</span></div>
-    <div class="cyc-sub">Duró ${c.len} días${c.atypical ? ' (¿fecha mal puesta o manchado?)' : ` (esperado ${c.expected})`} · ${bleedTxt}</div>
+    <div class="cyc-top"><span>${fmtDate(c.start)}</span><span class="dev ${c.atypical ? 'cur' : devClass(c.refDelta)}">${c.atypical ? 'Atípico · no cuenta' : devLabel(c.refDelta)}</span></div>
+    <div class="cyc-sub">Duró ${c.len} días${c.atypical ? ' (¿fecha mal puesta o manchado?)' : ` · referencia ${store.refCycleLen}`} · ${bleedTxt}</div>
+    ${c.atypical ? '' : `<div class="cyc-sub">Contra su propio ritmo (${c.expected}): ${c.delta>0?'+':''}${c.delta} ${Math.abs(c.delta)===1?'día':'días'}</div>`}
     ${epTxt}
     ${c.note ? `<div class="cyc-note">“${escapeHtml(c.note)}”</div>` : ''}
   </div>`;
@@ -1111,13 +1126,13 @@ function renderHistory(){
   if(regs.length){
     const lastStr = regs[regs.length-1];
     const sinceStart = daysBetween(parseDateStr(lastStr), today) + 1;
-    const late = getLateDays();
+    const late = Math.max(0, sinceStart - 1 - (store.refCycleLen || 28));
     const curEnd = store.periodEnds[lastStr];
     const curBleed = curEnd ? `${daysBetween(parseDateStr(lastStr), parseDateStr(curEnd)) + 1} días de sangrado` : 'sangrado: sin registrar';
     const curNote = store.cycleNotes[lastStr];
     items.push({ start: lastStr, html: `<div class="cyc-row" data-start="${lastStr}">
       <div class="cyc-top"><span>${fmtDate(lastStr)}</span><span class="dev ${late > 0 ? 'bad' : 'cur'}">${late > 0 ? `En curso · atraso ${late} ${late===1?'día':'días'}` : 'En curso'}</span></div>
-      <div class="cyc-sub">Día ${Math.max(1, sinceStart)} del ciclo (esperado ${store.cycleLen}) · ${curBleed}</div>
+      <div class="cyc-sub">Día ${Math.max(1, sinceStart)} del ciclo (referencia ${store.refCycleLen} · su ritmo ${store.cycleLen}) · ${curBleed}</div>
       ${curNote ? `<div class="cyc-note">“${escapeHtml(curNote)}”</div>` : ''}
     </div>` });
   }
@@ -1385,6 +1400,7 @@ document.getElementById('settingsLink').addEventListener('click', (e) => {
   e.preventDefault();
   document.getElementById('editCycleLen').value = store.cycleLen;
   document.getElementById('editPeriodLen').value = store.periodLen;
+  document.getElementById('editRefLen').value = store.refCycleLen || 28;
   document.getElementById('settingsOverlay').classList.add('open');
 });
 document.getElementById('settingsCloseBtn').addEventListener('click', () => {
@@ -1396,13 +1412,14 @@ document.getElementById('settingsOverlay').addEventListener('click', (e) => {
 document.getElementById('settingsSaveBtn').addEventListener('click', () => {
   store.cycleLen = parseInt(document.getElementById('editCycleLen').value) || 28;
   store.periodLen = parseInt(document.getElementById('editPeriodLen').value) || 5;
+  store.refCycleLen = parseInt(document.getElementById('editRefLen').value) || 28;
   saveData();
   document.getElementById('settingsOverlay').classList.remove('open');
   renderAll();
 });
 document.getElementById('resetDataBtn').addEventListener('click', () => {
   if(confirm('¿Borrar todos los datos guardados? Esto no se puede deshacer.')){
-    store = { cycleLen: 28, periodLen: 5, history: [], logs: {}, periodOverrides: {}, periodEnds: {}, cycleNotes: {}, cycleFlags: {}, baseCycleLen: 28 };
+    store = { cycleLen: 28, periodLen: 5, history: [], logs: {}, periodOverrides: {}, periodEnds: {}, cycleNotes: {}, cycleFlags: {}, refCycleLen: 28, baseCycleLen: 28 };
     saveData();
     document.getElementById('settingsOverlay').classList.remove('open');
     document.getElementById('setupOverlay').classList.add('open');
